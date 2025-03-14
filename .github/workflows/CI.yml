@@ -1,0 +1,48 @@
+on: [pull_request, push]
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+      - name: Set Pre-commit up
+        run: sudo apt-get --assume-yes install pre-commit
+      - name: Run Pre-commit hooks on all the files
+        run: pre-commit run --all-files
+
+  test:
+    strategy:
+      matrix:
+        runner: [macos-13, macos-latest, ubuntu-latest, windows-latest]
+        python: ['3.12', '3.13']
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+      - name: Set Python ${{ matrix.python }} up
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the project and Pytest
+        run: pip install . pytest
+      - name: Remove everything except tests
+        # A cross-platform way
+        shell: python
+        run: |
+          from os import listdir, unlink
+          from os.path import isdir
+          from shutil import rmtree
+
+          for basename in listdir():
+            if basename in {".git", "tests"}:
+              continue
+            if isdir(basename):
+              rmtree(basename)
+            else:
+              unlink(basename)
+      - name: Run the tests
+        run: pytest
