@@ -1,0 +1,280 @@
+# A workflow that performs continuous integration of all the branches to be pulled to the "preferred" branch.
+# Since GitHub cannot trigger the workflow on a push to other branches, it is scheduled to test the branches regularly.
+# It uses Git notes to mark commits which were tested already in order to skip them later and save GitHub Actions' resources.
+
+env:
+  # An author name used in the GitHub notes.
+  git_author_name: 'GitHub Actions'
+  # An author email used in the GitHub notes.
+  git_author_email: 'github-actions@users.noreply.github.com'
+  # The GitHub notes' repository.
+  gh_notes_repository: ${{ github.repository }}
+  # The GitHub notes' SHA.
+  gh_notes_sha: ${{ github.sha }}
+  # The GitHub notes' printf pattern.
+  gh_notes_pattern: '%s/%s: %s'
+  # The artifacts' name's format pattern.
+  gh_artifacts_name_pattern: 'integration{0}'
+  # The artifacts' path.
+  gh_artifacts_path: 'notes.txt'
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  list:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          gh_prs_limit: 100
+        shell: sh
+        run: |
+          # CSV: <repo_owner>/<repo_name> <repo_branch>
+          /usr/bin/env printf "$GITHUB_REPOSITORY preferred\n" |
+          
+            # CSV: <repo_owner> <repo_name> <repo_branch>
+            /usr/bin/env tr / " " |
+
+            # Add pull requests
+            while IFS=" " read -r gh_repo_owner gh_repo_name gh_repo_branch; do
+              /usr/bin/env printf "$gh_repo_owner $gh_repo_name $gh_repo_branch\n"
+              (
+                /usr/bin/env gh pr list --repo "$gh_repo_owner/$gh_repo_name" --base "$gh_repo_branch" --limit $gh_prs_limit --json headRefName,headRepository,headRepositoryOwner,number --template '{{range .}}{{.number}} {{.headRepositoryOwner.login}} {{.headRepository.name}} {{.headRefName}}{{"\n"}}{{end}}' && gh_repo_branch_prs_exit=$? || gh_repo_branch_prs_exit=$?
+                /usr/bin/env printf "$gh_repo_branch_prs_exit\n" >"GH PRs ${gh_repo_owner} ${gh_repo_name} exit.txt"
+              ) |
+                /usr/bin/env nl -s " " |
+                while IFS=" " read -r gh_repo_branch_pr_index gh_repo_branch_pr_number gh_repo_owner gh_repo_name gh_repo_branch; do
+                  /usr/bin/env printf "Found PR: %s\n" "$gh_repo_branch_pr_number" >&2
+                  /usr/bin/env printf "$gh_repo_branch_pr_index\n" > "GH PRs ${gh_repo_owner} ${gh_repo_name} count.txt"
+                  /usr/bin/env printf "$gh_repo_owner $gh_repo_name $gh_repo_branch\n"
+                done
+            done |
+
+            # Sort
+            /usr/bin/env sort |
+
+            # Discard duplicates
+            /usr/bin/env uniq |
+
+            # CSV: <repo_owner> <repo_name> <repo_branch1> <repo_branch2> ...
+            (
+              while IFS=" " read -r gh_repo_owner gh_repo_name gh_repo_branch; do
+                if [ "$gh_repo_owner $gh_repo_name" != "$gh_repo_last" ]; then
+                  /usr/bin/env printf "\n$gh_repo_owner $gh_repo_name"
+                  gh_repo_last="$gh_repo_owner $gh_repo_name"
+                fi
+                /usr/bin/env printf " $gh_repo_branch"
+              done
+              /usr/bin/env printf "\n"
+            ) |
+
+            # Skip the first empty line
+            /usr/bin/env tail -n +2 |
+
+            # , {"owner": "<repo1_owner>", "name": "<repo1_name>", "branches": ["<repo1_branch1>", "<repo1_branch2>", ...]}, {"owner": "<repo2_owner>", "name": "<repo2_name>", "branches": ["<repo2_branch1>", "<repo2_branch2>", ...]}, ...
+            while IFS=" " read -r gh_repo_owner gh_repo_name gh_repo_branches; do
+              /usr/bin/env printf ', {"owner": "%s", "name": "%s", "branches": ["%s"]}' "$gh_repo_owner" "$gh_repo_name" "$(/usr/bin/env printf "$gh_repo_branches" | /usr/bin/env sed -E 's/ /", "/g')"
+            done |
+
+            # Skip the initial ", "
+            /usr/bin/env tail -c +3 |
+
+            # repositories=[{"owner": "<repo1_owner>", "name": "<repo1_name>", "branches": ["<repo1_branch1>", "<repo1_branch2>", ...]}, {"owner": "<repo2_owner>", "name": "<repo2_name>", "branches": ["<repo2_branch1>", "<repo2_branch2>", ...]}, ...]
+            (
+              /usr/bin/env printf "repositories=["
+              /usr/bin/env cat -
+              /usr/bin/env printf "]\n"
+            ) |
+            
+            tee "$GITHUB_OUTPUT"
+          
+          if /usr/bin/env grep -F -q -v 0 "GH PRs "*" exit.txt"; then
+              /usr/bin/env printf "error: Failed to fetch GitHub PRs." >&2
+              exit 1
+          fi
+          /usr/bin/env cat "GH PRs "*" count.txt" | while IFS="" read -r gh_prs_count; do
+            if [ $gh_prs_count -ge $gh_prs_limit ]; then
+              /usr/bin/env printf "error: GitHub PRs count limit reached. Increase it if possible." >&2
+              exit 1
+            fi
+          done
+    outputs:
+      repositories: ${{ steps.list.outputs.repositories }}
+
+  integrate:
+    needs: [list]
+    strategy:
+      matrix:
+        gh_test_repo: ${{ fromJSON(needs.list.outputs.repositories) }}
+      fail-fast: false
+    if: needs.list.outputs.repositories != '[]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the notes repository ${{ env.gh_notes_repository }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.gh_notes_repository }}
+          ref: ${{ env.gh_notes_sha }}
+          path: notes
+      - name: Checkout the test repository ${{ matrix.gh_test_repo.owner }}/${{ matrix.gh_test_repo.name }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.gh_test_repo.owner }}/${{ matrix.gh_test_repo.name }}
+          ref: ${{ matrix.gh_test_repo.branches[0] }}
+          path: test
+      - name: Perform continuous integration of all the branches in the ${{ matrix.gh_test_repo.owner }}/${{ matrix.gh_test_repo.name }} repository to be pulled to the "preferred" branch
+        id: integrate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          gh_test_repo_commit_run_suffix_pattern: ' (%s)'
+        shell: sh
+        run: |
+          gh_test_repo_commits_delimiter=$(/usr/bin/env printf "\t")
+          case $(/usr/bin/env printf "${{ env.gh_notes_pattern }}" "${{ matrix.gh_test_repo.owner }}" "${{ matrix.gh_test_repo.name }}" "0123456789abcdef0123456789ABCDEF01234567") in
+            *"$gh_test_repo_commits_delimiter"*) exit 1;;
+          esac
+          
+          # CSV: <sha>\t<run>\t<note>
+          /usr/bin/env printf "Fetching branches...\n" >&2
+          /usr/bin/env git -C test fetch --verbose origin ${{ join(matrix.gh_test_repo.branches, ' ') }}
+          /usr/bin/env git -C test rev-parse $(/usr/bin/env printf "${{ join(matrix.gh_test_repo.branches, ' ') }}" | /usr/bin/env sed -E 's,(\S+),origin/\1,g') |
+            /usr/bin/env sort |
+            /usr/bin/env uniq |
+            while IFS="" read -r gh_test_repo_commit_sha; do
+              /usr/bin/env printf "%s%s%s%s${{ env.gh_notes_pattern }}\n" "$gh_test_repo_commit_sha" "$gh_test_repo_commits_delimiter" "$(/usr/bin/env python -c 'import uuid; print(uuid.uuid4())')" "$gh_test_repo_commits_delimiter" "${{ matrix.gh_test_repo.owner }}" "${{ matrix.gh_test_repo.name }}" "$gh_test_repo_commit_sha"
+            done |
+            /usr/bin/env tee GH_test_repo_commits_sorted.csv
+
+          # List commits which were tested yet
+          /usr/bin/env printf "Fetching notes...\n" >&2
+          gh_test_repo_commits_runs_created=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          /usr/bin/env git -C notes fetch --verbose origin 'refs/notes/*:refs/notes/*'
+          /usr/bin/env git -C notes notes show |
+          
+            # Print test commits which were not tested yet
+            # CSV: <sha>\t<run>\t<note>
+            /usr/bin/env sort | /usr/bin/env join -v 1 -o 1.1,1.2,0 -t "$gh_test_repo_commits_delimiter" -1 3 GH_test_repo_commits_sorted.csv - |
+
+            # Start CI workflows
+            # CSV: <sha>\t<run>\t<note>
+            while IFS="$gh_test_repo_commits_delimiter" read -r gh_test_repo_commit_sha gh_test_repo_commit_run_uuid gh_test_repo_commit_note; do
+              /usr/bin/env printf "Starting the CI workflow on %s/%s at %s...\n" "${{ matrix.gh_test_repo.owner }}" "${{ matrix.gh_test_repo.name }}" "$gh_test_repo_commit_sha" >&2
+              gh_test_repo_commit_run_suffix=$(/usr/bin/env printf "${{ env.gh_test_repo_commit_run_suffix_pattern }}" "$gh_test_repo_commit_run_uuid")
+              /usr/bin/env gh workflow run preferred-CI-one.yml --repo "$GITHUB_REPOSITORY" --raw-field "commit_repository=${{ matrix.gh_test_repo.owner }}/${{ matrix.gh_test_repo.name }}" --raw-field "commit_ref=$gh_test_repo_commit_sha" --raw-field "run_name_suffix=$gh_test_repo_commit_run_suffix" && gh_test_repo_commit_run_start_exit=$? || gh_test_repo_commit_run_start_exit=$?
+              /usr/bin/env printf "$gh_test_repo_commit_run_start_exit\n" >"GH_test_repo_commit_${gh_test_repo_commit_sha}_run_start.txt"
+              /usr/bin/env printf "%s%s%s%s%s\n" "$gh_test_repo_commit_sha" "$gh_test_repo_commits_delimiter" "$gh_test_repo_commit_run_uuid" "$gh_test_repo_commits_delimiter" "$gh_test_repo_commit_note"
+            done |
+
+            # Waiting for the CI workflows
+            # CSV: <note>
+            while IFS="$gh_test_repo_commits_delimiter" read -r gh_test_repo_commit_sha gh_test_repo_commit_run_uuid gh_test_repo_commit_note; do
+              /usr/bin/env printf "Fetching the CI workflow's runs on %s/%s at %s...\n" "${{ matrix.gh_test_repo.owner }}" "${{ matrix.gh_test_repo.name }}" "$gh_test_repo_commit_sha" >&2
+              gh_test_repo_commit_run_suffix=$(/usr/bin/env printf "${{ env.gh_test_repo_commit_run_suffix_pattern }}" "$gh_test_repo_commit_run_uuid")
+              while ! [ "$(
+                # CSV: <run_id> <run_name>
+                (
+                  /usr/bin/env gh run list --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --workflow preferred-CI-one.yml --event workflow_dispatch --created ">=$gh_test_repo_commits_runs_created" --limit 100 --json databaseId,name --template '{{range .}}{{printf "%.f" .databaseId}} {{.name}}{{"\n"}}{{end}}' && gh_test_repo_commit_run_list_exit=$? || gh_test_repo_commit_run_list_exit=$?
+                  /usr/bin/env printf "$gh_test_repo_commit_run_list_exit\n" >"GH_test_repo_commit_${gh_test_repo_commit_sha}_run_list.txt"
+                ) |
+                  
+                  # Print only the runs with the suffix
+                  # CSV: <run_id>
+                  while IFS=" " read -r gh_test_repo_commit_run_id gh_test_repo_commit_run_name; do
+                    case "$gh_test_repo_commit_run_name" in
+                      *"$gh_test_repo_commit_run_suffix") /usr/bin/env printf "%s\n" "$gh_test_repo_commit_run_id";;
+                    esac
+                  done |
+                  
+                  # Wait for the run
+                  # CSV: <run_exit>
+                  while IFS="" read -r gh_test_repo_commit_run_id; do
+                    /usr/bin/env printf "Watching until the test workflow run on %s/%s at %s completes...\n" "${{ matrix.gh_test_repo.owner }}" "${{ matrix.gh_test_repo.name }}" "$gh_test_repo_commit_sha" >&2
+                    /usr/bin/env gh run watch "$gh_test_repo_commit_run_id" --repo "$GITHUB_REPOSITORY" --exit-status >&2 && gh_test_repo_commit_run_watch_exit=$? || gh_test_repo_commit_run_watch_exit=$?
+                    /usr/bin/env printf "$gh_test_repo_commit_run_watch_exit\n"
+                  done |
+
+                  /usr/bin/env tee -a "GH_test_repo_commit_${gh_test_repo_commit_sha}_run_watch.txt"
+              )" ]; do
+                /usr/bin/env sleep 3
+              done
+              if ! /usr/bin/env grep -F -q -v 0 "GH_test_repo_commit_${gh_test_repo_commit_sha}_run_watch.txt"; then
+                /usr/bin/env printf "%s\n" "$gh_test_repo_commit_note"
+              fi
+            done |
+
+            /usr/bin/env tee "${{ env.gh_artifacts_path }}"
+
+          if /usr/bin/env grep -F -q -v 0 GH_test_repo_commit_*_run_start.txt; then
+              /usr/bin/env printf "error: Failed to start CI workflow." >&2
+              exit 1
+          fi
+          if /usr/bin/env grep -F -q -v 0 GH_test_repo_commit_*_run_list.txt; then
+              /usr/bin/env printf "error: Failed to fetch CI workflows' runs." >&2
+              exit 1
+          fi
+          if /usr/bin/env grep -F -q -v 0 GH_test_repo_commit_*_run_watch.txt; then
+              /usr/bin/env printf "error: CI workflows failed." >&2
+              exit 1
+          fi
+      # Workaround: https://github.com/orgs/community/discussions/17245
+      - name: Cache the notes about the successfully integrated commits
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.gh_artifacts_path }}
+          if-no-files-found: error
+          name: ${{format(env.gh_artifacts_name_pattern, strategy.job-index)}}
+
+  # Push the notes about the successfully integrated commits in one job in order to avoid merge conflicts if done in parallel.
+  note:
+    needs: [integrate]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the notes repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.gh_notes_repository }}
+          ref: ${{ env.gh_notes_sha }}
+      - name: Read the cached notes about the successfully integrated commits
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{format(env.gh_artifacts_name_pattern, '*')}}
+          path: integrated
+      - name: Push the new notes
+        shell: sh
+        run: |
+          _cat_notes() {
+            /usr/bin/env git notes show || true
+            /usr/bin/env cat - integrated/*/"${{ env.gh_artifacts_path }}"
+          }
+          
+          /usr/bin/env printf "Fetching notes...\n" >&2
+          /usr/bin/env git config user.name "${{ env.git_author_name }}"
+          /usr/bin/env git config user.email "${{ env.git_author_email }}"
+          /usr/bin/env git fetch --verbose origin 'refs/notes/*:refs/notes/*'
+          
+          /usr/bin/env printf "Appending the new notes...\n" >&2
+          if _cat_notes | /usr/bin/env grep -F -q "'"; then
+              /usr/bin/env printf "error: The code below assumes there is no apostrophe in notes which is not the case." >&2
+              exit 1
+          fi
+          # <note>
+          _cat_notes |
+            /usr/bin/env sort |
+            /usr/bin/env uniq |
+            # --message='<note>'
+            /usr/bin/env sed -E "s/^.*$/--message='&'/g" |
+            /usr/bin/env xargs -r /usr/bin/env git notes add --force
+          
+          /usr/bin/env printf "Pushing the new notes...\n" >&2
+          /usr/bin/env git push --verbose origin refs/notes/commits
