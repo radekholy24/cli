@@ -1,0 +1,143 @@
+# A workflow that performs a continuous integration of the "preferred" branch.
+# Since GitHub cannot trigger the workflow on a push to other branches, it is scheduled to test the branches regularly.
+# It uses Git notes to mark commits which were tested already in order to skip them later and save GitHub Actions' resources.
+
+env:
+  # An author name used in the Git notes.
+  git_author_name: 'GitHub Actions'
+  # An author email used in the Git notes.
+  git_author_email: 'github-actions@users.noreply.github.com'
+  # The Git notes' Python template.
+  git_note: 'Tested by: {repository}/commit/{commit}'
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  pull_request:
+    branches: [preferred]
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tree:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            commit_to_test="preferred"
+          elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            commit_to_test="$GITHUB_REF"
+          else
+            preferred + pull requests
+          fi
+          # TODO
+          git cat-file -p "$commit_to_test"
+          git rev-parse "$commit_to_test^{tree}"
+  # Output a JSON array of the branches' SHAs to be tested.
+  #branches:
+  #  runs-on: ubuntu-24.04
+  #  steps:
+  #    - name: Checkout the repository
+  #      uses: actions/checkout@v4
+  #    - name: Set Python up
+  #      run: /usr/bin/env sudo /usr/bin/env apt-get --assume-yes install python3
+  #    - name: List branches to test
+  #      id: shas
+  #      # The Python script turns out to be more readable than a Bash script in this case...
+  #      shell: python
+  #      run: |
+  #        import json
+  #        import logging
+  #        import os
+  #        import subprocess
+  #
+  #        subprocess.run(["git", "fetch", "--verbose", "origin", "refs/heads/*:refs/remotes/origin/*", "refs/notes/*:refs/notes/*"], check=True)
+  #
+  #        git_branches = dict(git_branch.rsplit(maxsplit=1) for git_branch in subprocess.run(["git", "branch", "--remotes", "--format", "%(refname:lstrip=2) %(objectname)"], capture_output=True, text=True, check=True).stdout.splitlines())
+  #
+  #        for git_branch_excluded in git_branches.keys() & set("${{ env.git_branches_excluded }}".split()):
+  #          logging.warning("Branch %s excluded.", git_branch_excluded)
+  #          del git_branches[git_branch_excluded]
+  #
+  #        for git_branch_name, git_branch_sha in set(git_branches.items()):
+  #          if any(git_branch_note.startswith("${{ env.git_note }}") for git_branch_note in subprocess.run(["git", "notes", "show", git_branch_sha], capture_output=True, text=True).stdout.splitlines()):
+  #            logging.warning("Branch %s tested already.", git_branch_name)
+  #            del git_branches[git_branch_name]
+  #
+  #        with open(os.environ["GITHUB_OUTPUT"], "a") as step_output:
+  #          step_output.write("shas=")
+  #          json.dump(list(set(git_branches.values())), step_output)
+  #  outputs:
+  #    shas: ${{ steps.shas.outputs.shas }}
+
+  ## Test the branches.
+  #test:
+  #  needs: branches
+  #  if: needs.branches.outputs.shas != '[]'
+  #  strategy:
+  #    matrix:
+  #      sha: ${{ fromJSON(needs.branches.outputs.shas) }}
+  #      runner: [ubuntu-20.04, ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+  #      python: ['3.9', '3.10', '3.11', '3.12', '3.13', 'graalpy-24.1', 'pypy-3.10', 'pypy-3.11']
+  #      exclude:
+  #        - runner: ubuntu-22.04-arm
+  #          python: 'pypy-3.10'
+  #        - runner: ubuntu-22.04-arm
+  #          python: 'pypy-3.11'
+  #        - runner: ubuntu-24.04-arm
+  #          python: 'pypy-3.10'
+  #        - runner: ubuntu-24.04-arm
+  #          python: 'pypy-3.11'
+  #  runs-on: ${{ matrix.runner }}
+  #  steps:
+  #    - name: Set Findutils and Locales up
+  #      run: /usr/bin/env sudo /usr/bin/env apt-get --assume-yes install findutils locales
+  #    - name: Set Python ${{ matrix.python }} up
+  #      uses: actions/setup-python@v5
+  #      with:
+  #        python-version: ${{ matrix.python }}
+  #    - name: Checkout the ${{ matrix.sha }} branch
+  #      uses: actions/checkout@v4
+  #      with:
+  #        ref: ${{ matrix.sha }}
+  #    - name: Generate required locale
+  #      run: |
+  #        /usr/bin/env printf "
+  #        C.UTF-8 UTF-8
+  #        en_US.ISO-8859-15 ISO-8859-15
+  #        en_US.UTF-8 UTF-8
+  #        et_EE.ISO-8859-15 ISO-8859-15
+  #        zh_TW.UTF-8 UTF-8
+  #        " | /usr/bin/env sudo /usr/bin/env tee -a /etc/locale.gen
+  #        /usr/bin/env sudo /usr/bin/env locale-gen
+  #    - name: Install the project
+  #      run: /usr/bin/env python -m pip --verbose install .
+  #    - name: Remove everything except tests
+  #      run: /usr/bin/env find . ! -path . ! -path ./tests ! -path './tests/*' -print -delete
+  #    - name: Run the tests
+  #      run: /usr/bin/env python -m unittest --verbose
+
+  ## If all the tests pass, mark the tested branches with the Git note.
+  #mark:
+  #  needs: [branches, test]
+  #  if: needs.branches.outputs.shas != '[]'
+  #  strategy:
+  #    matrix:
+  #      sha: ${{ fromJSON(needs.branches.outputs.shas) }}
+  #  runs-on: ubuntu-24.04
+  #  steps:
+  #    - name: Checkout the ${{ matrix.sha }} branch
+  #      uses: actions/checkout@v4
+  #      with:
+  #        ref: ${{ matrix.sha }}
+  #    - name: Mark the ${{ matrix.sha }} branch as tested
+  #      run: |
+  #        set -x
+  #        /usr/bin/env git config user.name "${{ env.git_author_name }}"
+  #        /usr/bin/env git config user.email "${{ env.git_author_email }}"
+  #        /usr/bin/env git fetch --verbose origin refs/notes/*:refs/notes/*
+  #        /usr/bin/env git notes append -m "${{ env.git_note }}$GITHUB_RUN_ID"
+  #        /usr/bin/env git push --verbose origin refs/notes/commits
