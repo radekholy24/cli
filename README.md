@@ -9,3 +9,5 @@ tools agnostic - contains the GitHub specific configuration, such as a GitHub Ac
 
 The entire contents of the repository is free and open-source. More precisely, it is distributed under the MIT license.
 See the [`LICENSE`](/LICENSE) file.
+
+test
