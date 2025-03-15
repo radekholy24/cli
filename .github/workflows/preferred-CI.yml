@@ -1,6 +1,4 @@
 # A workflow that performs a continuous integration of the "preferred" branch.
-# Since GitHub cannot trigger the workflow on a push to other branches, it is scheduled to test the branches regularly.
-# It uses Git notes to mark commits which were tested already in order to skip them later and save GitHub Actions' resources.
 
 env:
   # An author name used in the Git notes.
@@ -11,11 +9,10 @@ env:
   git_note: 'Tested by: {repository}/commit/{commit}'
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   pull_request:
-    branches: [preferred]
+    branches: [preferred, github]
   push:
+    branches: [preferred, github]
   workflow_dispatch:
 
 permissions:
@@ -26,16 +23,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
-            commit_to_test="preferred"
-          elif [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            commit_to_test="$GITHUB_REF"
+          if [[ "$GITHUB_REF" == preferred ]]; then
+            refs_to_test=preferred
           else
-            preferred + pull requests
+            gh pr list --base preferred --json
           fi
-          # TODO
-          git cat-file -p "$commit_to_test"
-          git rev-parse "$commit_to_test^{tree}"
+          #git cat-file -p "$commit_to_test"
+          #git rev-parse "$commit_to_test^{tree}"
   # Output a JSON array of the branches' SHAs to be tested.
   #branches:
   #  runs-on: ubuntu-24.04
