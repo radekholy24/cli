@@ -19,8 +19,9 @@ env:
   gh_artifacts_path: 'notes.txt'
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # Let's save GitHub some resources by turning the schedule off temporarily...
+  #schedule:
+  #  - cron: '*/5 * * * *'
   push:
   pull_request:
   workflow_dispatch:
